@@ -22,7 +22,7 @@ class MMConfig:
 
 @dataclass(frozen=True)
 class LoggerConfig:
-    interval_ms: int = 250
+    interval_ms: int = 100
     sigma_floor_ann: float = 0.15
 
 

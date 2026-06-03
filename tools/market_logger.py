@@ -62,7 +62,7 @@ def main() -> None:
     p.add_argument(
         "--interval-ms",
         type=int,
-        default=int(os.environ.get("LOGGER_INTERVAL_MS", "250")),
+        default=int(os.environ.get("LOGGER_INTERVAL_MS", "100")),
     )
     p.add_argument(
         "--out",

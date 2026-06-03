@@ -28,7 +28,7 @@ PM_MARKET_SLUGS={"BTCUSDT":"<btc-5m-slug>"}
 
 LOG_OUT_TEMPLATE=/opt/alpha-trader/output/logs/market_%Y-%m-%d.jsonl
 HEALTH_FILE=/opt/alpha-trader/output/health/logger.json
-LOGGER_INTERVAL_MS=250
+LOGGER_INTERVAL_MS=100
 LOG_LEVEL=INFO
 ```
 
@@ -65,4 +65,4 @@ No inbound ports required. Egress to:
 
 ## Disk
 
-~5–20 MB/day JSONL at 250 ms interval; logrotate keeps 14 days by default.
+~8–35 MB/day JSONL at 100 ms interval (compact rows); logrotate keeps 14 days by default.

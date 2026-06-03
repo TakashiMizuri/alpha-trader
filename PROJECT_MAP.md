@@ -1,7 +1,7 @@
 # Project map — alpha-trader (PM Spot Fair)
 
 **Repo:** `alpha-trader` · **Package:** `pm_spot_fair` · **Spec:** `STRATEGY.md` v2.0  
-**Current release:** v0.1 (phases 0, 1, 1b + VPS deploy, **7 Binance symbols**)
+**Current release:** v0.1.1 (phases 0, 1, 1b + VPS deploy; logger **100 ms**, compact JSONL)
 
 ---
 
@@ -49,6 +49,7 @@ alpha-trader/
 │   ├── pm_book.py         # mid, microprice, edge  [1b]
 │   ├── latency.py         # histograms  [1b/6]
 │   ├── health.py          # logger.json for ops  [1b deploy]
+│   ├── log_format.py      # compact JSONL rows + expand for analysis  [1b]
 │   ├── market_logger_service.py  # live engine  [1b]
 │   ├── feeds/             # Binance WS, PM CLOB, Gamma  [1b]
 │   ├── book_pressure.py   # stub → phase 4
@@ -124,7 +125,7 @@ py -3 tools/verify_deploy.py
 | `PM_YES_TOKEN_ID_*` | per-symbol CLOB YES token |
 | `LOG_OUT_TEMPLATE` | dated JSONL path |
 | `HEALTH_FILE` | `output/health/logger.json` |
-| `LOGGER_INTERVAL_MS` | tick interval |
+| `LOGGER_INTERVAL_MS` | tick interval (default 100 ms) |
 | `PM_API_*` | phase 6 only (not 1b) |
 
 ---

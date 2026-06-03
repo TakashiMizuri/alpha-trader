@@ -8,7 +8,8 @@ Mechanistic fair probability \(p^\*\) for Polymarket BTC Up/Down 5m markets from
 | [PROJECT_MAP.md](PROJECT_MAP.md) | Repo structure & phase status |
 | [AGENTS.md](AGENTS.md) | Rules for AI agents |
 | [deploy/DEPLOY.md](deploy/DEPLOY.md) | VPS installation |
-| [changelog/v0.1.md](changelog/v0.1.md) | Release notes |
+| [changelog/v0.1.1.md](changelog/v0.1.1.md) | Current release notes |
+| [changelog/v0.1.md](changelog/v0.1.md) | v0.1 release notes |
 
 ## Install
 

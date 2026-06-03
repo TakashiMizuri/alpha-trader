@@ -91,7 +91,7 @@
 ```toml
 [project]
 name = "pm-spot-fair"
-version = "0.1.0"
+version = "0.1.1"
 requires-python = ">=3.11"
 dependencies = [
   "numpy>=1.26",

@@ -13,6 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from pm_spot_fair.config import ArbConfig
+from pm_spot_fair.log_format import expand_log_row, tick_interval_ms
 
 
 def load_rows(path: Path) -> list[dict]:
@@ -22,7 +23,7 @@ def load_rows(path: Path) -> list[dict]:
         line = line.strip()
         if not line:
             continue
-        rows.append(json.loads(line))
+        rows.append(expand_log_row(json.loads(line)))
     return rows
 
 
@@ -36,8 +37,9 @@ def brier_on_rows(rows: list[dict]) -> float | None:
 
 
 def estimate_lag_ms(rows: list[dict]) -> tuple[float, float]:
+    tick_ms = tick_interval_ms(rows) or 100.0
     if len(rows) < 10:
-        return 250.0, 500.0
+        return tick_ms * 2.5, tick_ms * 5.0
 
     gaps = [abs(r.get("gap_level", 0.0)) for r in rows]
     mean_gap = sum(gaps) / len(gaps) if gaps else 0.0
@@ -45,9 +47,9 @@ def estimate_lag_ms(rows: list[dict]) -> tuple[float, float]:
     for i in range(1, min(len(rows), 100)):
         dp = abs(rows[i].get("p_star", 0) - rows[i - 1].get("p_star", 0))
         if dp > 0.001:
-            intervals_ms.append(250.0 * (1 + gaps[i] * 10))
+            intervals_ms.append(tick_ms * (1 + gaps[i] * 10))
     if not intervals_ms:
-        intervals_ms = [250.0, 400.0, 600.0]
+        intervals_ms = [tick_ms * 2.5, tick_ms * 4.0, tick_ms * 6.0]
     intervals_ms.sort()
     p50 = intervals_ms[len(intervals_ms) // 2]
     p95 = intervals_ms[int(len(intervals_ms) * 0.95)] if intervals_ms else 500.0

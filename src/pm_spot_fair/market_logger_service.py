@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import math
 import os
@@ -23,7 +22,7 @@ from pm_spot_fair.feeds.binance_ws import BinanceMultiBookTickerFeed, BinanceTic
 from pm_spot_fair.feeds.gamma import resolve_market_by_slug
 from pm_spot_fair.feeds.pm_clob import PMClobFeed
 from pm_spot_fair.health import LoggerHealth, utc_iso, write_health
-from pm_spot_fair.latency import utc_now_iso
+from pm_spot_fair.log_format import build_compact_row, serialize_row
 from pm_spot_fair.symbols import mock_base_price
 from pm_spot_fair.vol import sigma_ann_from_closes
 
@@ -177,9 +176,14 @@ class MarketLoggerService:
                 tau = tau_sec(now, window)
                 p_star = p_up_gbm(s=s_t, s0=s0, tau_sec=tau, sigma_ann=sigma)
                 p_mid, p_micro, bid, ask = self._mock_pm_quotes(st, p_star)
+                now_ms = int(now.timestamp() * 1000)
                 row = self._build_row(
                     symbol=sym,
                     window=window,
+                    ts_ms=now_ms,
+                    b_event_ms=now_ms,
+                    b_recv_ms=now_ms,
+                    pm_recv_ms=now_ms,
                     s0=s0,
                     s_t=s_t,
                     sigma=sigma,
@@ -191,9 +195,6 @@ class MarketLoggerService:
                     ask=ask,
                     pm_mock=True,
                     pm_connected=False,
-                    b_event_iso=utc_now_iso(),
-                    b_recv_iso=utc_now_iso(),
-                    pm_recv_iso=utc_now_iso(),
                 )
                 self._write_row(row, now)
                 st.ticks += 1
@@ -255,30 +256,29 @@ class MarketLoggerService:
 
         if st.pm_mock or self.mock_pm_global:
             p_mid, p_micro, bid, ask = self._mock_pm_quotes(st, p_star)
-            pm_recv = utc_now_iso()
             pm_connected = False
             pm_mock = True
+            pm_recv_ms = int(now.timestamp() * 1000)
         else:
             assert st.pm_feed is not None
             q = st.pm_feed.latest
             if q is None:
                 return None
             p_mid, p_micro, bid, ask = q.p_mid, q.p_micro, q.yes_bid, q.yes_ask
-            pm_recv = q.recv_time_utc.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
             pm_connected = st.pm_feed.connected
             pm_mock = False
+            pm_recv_ms = int(q.recv_time_utc.timestamp() * 1000)
 
-        event_iso = (
-            datetime.fromtimestamp(b.event_time_ms / 1000.0, tz=timezone.utc).strftime(
-                "%Y-%m-%dT%H:%M:%S.%f"
-            )[:-3]
-            + "Z"
-            if b.event_time_ms
-            else utc_now_iso()
-        )
+        ts_ms = int(now.timestamp() * 1000)
+        b_event_ms = b.event_time_ms or ts_ms
+        b_recv_ms = int(b.recv_time_utc.timestamp() * 1000)
         return self._build_row(
             symbol=sym,
             window=window,
+            ts_ms=ts_ms,
+            b_event_ms=b_event_ms,
+            b_recv_ms=b_recv_ms,
+            pm_recv_ms=pm_recv_ms,
             s0=s0,
             s_t=s_t,
             sigma=sigma,
@@ -290,9 +290,6 @@ class MarketLoggerService:
             ask=ask,
             pm_mock=pm_mock,
             pm_connected=pm_connected,
-            b_event_iso=event_iso,
-            b_recv_iso=b.recv_time_utc.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
-            pm_recv_iso=pm_recv,
         )
 
     def _build_row(
@@ -300,6 +297,10 @@ class MarketLoggerService:
         *,
         symbol: str,
         window: Window,
+        ts_ms: int,
+        b_event_ms: int,
+        b_recv_ms: int,
+        pm_recv_ms: int,
         s0: float,
         s_t: float,
         sigma: float,
@@ -311,41 +312,32 @@ class MarketLoggerService:
         ask: float,
         pm_mock: bool,
         pm_connected: bool,
-        b_event_iso: str,
-        b_recv_iso: str,
-        pm_recv_iso: str,
     ) -> dict:
-        return {
-            "ts_utc": utc_now_iso(),
-            "symbol": symbol,
-            "ts_binance_event": b_event_iso,
-            "ts_recv": b_recv_iso,
-            "ts_pm_recv": pm_recv_iso,
-            "window_id": window.window_id,
-            "tau_sec": round(tau, 3),
-            "s0": round(s0, 6),
-            "s_t": round(s_t, 6),
-            "sigma_ann": round(sigma, 4),
-            "p_star": round(p_star, 4),
-            "p_mkt_mid": round(p_mid, 4),
-            "p_mkt_micro": round(p_micro, 4),
-            "yes_bid": round(bid, 4),
-            "yes_ask": round(ask, 4),
-            "gap_level": round(p_mid - p_star, 4),
-            "i_bin": 0.0,
-            "i_pm": 0.0,
-            "gap_flow": 0.0,
-            "spread_pm": round(ask - bid, 4),
-            "outcome_pending": True,
-            "mock_pm": pm_mock,
-            "pm_connected": pm_connected,
-        }
+        return build_compact_row(
+            symbol=symbol,
+            window_t0_ms=int(window.t0_utc.timestamp() * 1000),
+            ts_ms=ts_ms,
+            b_event_ms=b_event_ms,
+            b_recv_ms=b_recv_ms,
+            pm_recv_ms=pm_recv_ms,
+            s0=s0,
+            s_t=s_t,
+            sigma=sigma,
+            tau=tau,
+            p_star=p_star,
+            p_mid=p_mid,
+            p_micro=p_micro,
+            bid=bid,
+            ask=ask,
+            pm_mock=pm_mock,
+            pm_connected=pm_connected,
+        )
 
     def _write_row(self, row: dict, now: datetime) -> None:
         out_path = resolve_log_path(self.out_template, now)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         with out_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(row) + "\n")
+            f.write(serialize_row(row) + "\n")
 
     def _mock_pm_quotes(
         self, st: SymbolState, p_star: float
