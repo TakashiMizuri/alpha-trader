@@ -4,7 +4,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from pm_spot_fair.feeds.gamma import resolve_market_by_slug
+from datetime import datetime, timezone
+
+from pm_spot_fair.feeds.gamma import effective_pm_slug, resolve_market_by_slug
 
 
 @pytest.mark.asyncio
@@ -28,3 +30,17 @@ async def test_resolve_market_by_slug():
 
     assert t.yes_token_id == "111"
     assert t.no_token_id == "222"
+
+
+def test_effective_pm_slug_adds_bucket() -> None:
+    from pm_spot_fair.feeds.gamma import five_min_interval_unix
+
+    now = datetime(2026, 6, 3, 16, 30, 0, tzinfo=timezone.utc)
+    assert (
+        effective_pm_slug("btc-updown-5m", now)
+        == f"btc-updown-5m-{five_min_interval_unix(now)}"
+    )
+
+
+def test_effective_pm_slug_passes_through_bucketed() -> None:
+    assert effective_pm_slug("btc-updown-5m-1780493400") == "btc-updown-5m-1780493400"

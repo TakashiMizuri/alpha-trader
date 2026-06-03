@@ -3,13 +3,39 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
 GAMMA_API = "https://gamma-api.polymarket.com"
+FIVE_MIN_SEC = 300
+_BUCKETED_SLUG_RE = re.compile(r"^.+-\d{10,}$")
+
+
+def five_min_interval_unix(now: datetime | None = None) -> int:
+    """UTC 5m window start (Polymarket up/down slug suffix)."""
+    ts = now or datetime.now(timezone.utc)
+    return int(ts.timestamp()) // FIVE_MIN_SEC * FIVE_MIN_SEC
+
+
+def effective_pm_slug(slug: str, now: datetime | None = None) -> str:
+    """
+    Map config slug to the active Gamma slug.
+
+    Polymarket BTC/ETH/SOL 5m markets use rolling slugs like
+    ``btc-updown-5m-1780493400``. ``.env`` may store the prefix only
+    (``btc-updown-5m``) or the full bucketed slug.
+    """
+    slug = slug.strip()
+    if not slug:
+        raise ValueError("empty slug")
+    if _BUCKETED_SLUG_RE.match(slug):
+        return slug
+    return f"{slug}-{five_min_interval_unix(now)}"
 
 
 @dataclass(frozen=True)

@@ -19,7 +19,7 @@ from pm_spot_fair.clock import Window, tau_sec
 from pm_spot_fair.config import LoggerConfig
 from pm_spot_fair.fair import p_up_gbm
 from pm_spot_fair.feeds.binance_ws import BinanceMultiBookTickerFeed, BinanceTick
-from pm_spot_fair.feeds.gamma import resolve_market_by_slug
+from pm_spot_fair.feeds.gamma import effective_pm_slug, resolve_market_by_slug
 from pm_spot_fair.feeds.pm_clob import PMClobFeed
 from pm_spot_fair.health import LoggerHealth, utc_iso, write_health
 from pm_spot_fair.log_format import build_compact_row, serialize_row
@@ -52,6 +52,8 @@ class SymbolState:
     lag_state: dict = field(default_factory=dict)
     pm_feed: PMClobFeed | None = None
     pm_mock: bool = True
+    pm_slug_active: str | None = None
+    pm_window_t0: float | None = None
     ticks: int = 0
 
 
@@ -119,28 +121,72 @@ class MarketLoggerService:
 
     async def _setup_pm_feeds(self) -> None:
         async with httpx.AsyncClient(timeout=15.0) as client:
+            now = datetime.now(timezone.utc)
             for sym, st in self._states.items():
-                token = self.pm_token_ids.get(sym)
-                slug = self.pm_slugs.get(sym)
-                if token:
-                    st.pm_feed = PMClobFeed(token, use_websocket=True)
-                    st.pm_mock = False
-                    await st.pm_feed.start()
-                elif slug and not self.mock_pm_global:
-                    try:
-                        tokens = await resolve_market_by_slug(client, slug)
-                        st.pm_feed = PMClobFeed(tokens.yes_token_id, use_websocket=True)
-                        st.pm_mock = False
-                        await st.pm_feed.start()
-                    except Exception:
-                        logger.warning(
-                            "PM slug resolve failed for %s (%s); PM mock for symbol",
-                            sym,
-                            slug,
-                        )
-                        st.pm_mock = True
-                else:
-                    st.pm_mock = True
+                await self._connect_pm_feed(sym, st, client, now)
+
+    async def _connect_pm_feed(
+        self,
+        sym: str,
+        st: SymbolState,
+        client: httpx.AsyncClient,
+        now: datetime,
+    ) -> None:
+        if st.pm_feed:
+            await st.pm_feed.stop()
+            st.pm_feed = None
+
+        token = self.pm_token_ids.get(sym)
+        slug_cfg = self.pm_slugs.get(sym)
+        if token:
+            st.pm_feed = PMClobFeed(token, use_websocket=True)
+            st.pm_mock = False
+            st.pm_slug_active = None
+            window = window_from_utc_5m(now, sym)
+            st.pm_window_t0 = window.t0_utc.timestamp()
+            await st.pm_feed.start()
+            return
+
+        if slug_cfg and not self.mock_pm_global:
+            slug = effective_pm_slug(slug_cfg, now)
+            try:
+                tokens = await resolve_market_by_slug(client, slug)
+                st.pm_feed = PMClobFeed(tokens.yes_token_id, use_websocket=True)
+                st.pm_mock = False
+                st.pm_slug_active = slug
+                window = window_from_utc_5m(now, sym)
+                st.pm_window_t0 = window.t0_utc.timestamp()
+                await st.pm_feed.start()
+                logger.info("PM live for %s slug=%s", sym, slug)
+                return
+            except Exception:
+                logger.warning(
+                    "PM slug resolve failed for %s (cfg=%s, tried=%s); PM mock",
+                    sym,
+                    slug_cfg,
+                    slug,
+                    exc_info=True,
+                )
+        st.pm_mock = True
+        st.pm_slug_active = None
+        st.pm_window_t0 = None
+
+    async def _maybe_rotate_pm_feed(
+        self,
+        sym: str,
+        st: SymbolState,
+        now: datetime,
+        client: httpx.AsyncClient,
+    ) -> None:
+        if st.pm_mock or self.mock_pm_global or sym in self.pm_token_ids:
+            return
+        if not self.pm_slugs.get(sym):
+            return
+        window = window_from_utc_5m(now, sym)
+        t0 = window.t0_utc.timestamp()
+        if st.pm_window_t0 == t0 and st.pm_feed:
+            return
+        await self._connect_pm_feed(sym, st, client, now)
 
     async def _run_mock_loop(self) -> None:
         rng = random.Random(self._rng_seed)
@@ -210,17 +256,21 @@ class MarketLoggerService:
         any_written = False
         pm_any = False
 
-        for sym, st in self._states.items():
-            b = self._binance.latest(sym)
-            if b is None:
-                continue
-            row = await self._tick_symbol(sym, st, b, now)
-            if row:
-                self._write_row(row, now)
-                st.ticks += 1
-                any_written = True
-                if row.get("pm_connected"):
-                    pm_any = True
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            for sym, st in self._states.items():
+                await self._maybe_rotate_pm_feed(sym, st, now, client)
+
+            for sym, st in self._states.items():
+                b = self._binance.latest(sym)
+                if b is None:
+                    continue
+                row = await self._tick_symbol(sym, st, b, now)
+                if row:
+                    self._write_row(row, now)
+                    st.ticks += 1
+                    any_written = True
+                    if row.get("pc") or st.pm_feed and st.pm_feed.connected:
+                        pm_any = True
 
         if not any_written:
             self._write_health("degraded")
