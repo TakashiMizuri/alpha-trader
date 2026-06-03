@@ -142,6 +142,11 @@ class PMClobFeed:
 
     async def _connect_ws_once(self) -> None:
         logger.info("Connecting PM CLOB WS")
+        if self._client is not None:
+            try:
+                await self._fetch_book_rest()
+            except Exception:
+                logger.warning("PM REST bootstrap before WS failed", exc_info=True)
         async with websockets.connect(
             PM_WS_URL,
             ping_interval=None,
@@ -174,7 +179,20 @@ class PMClobFeed:
             await ws.send("PING")
 
     def _on_ws_message(self, raw: str | bytes) -> None:
-        data = json.loads(raw)
+        payload = json.loads(raw)
+        if isinstance(payload, list):
+            for item in payload:
+                if isinstance(item, dict):
+                    self._apply_market_event(item)
+            return
+        if isinstance(payload, dict):
+            self._apply_market_event(payload)
+
+    def _apply_market_event(self, data: dict) -> None:
+        asset_id = data.get("asset_id")
+        if asset_id is not None and str(asset_id) != str(self.yes_token_id):
+            return
+
         event = data.get("event_type") or data.get("type")
         if event == "best_bid_ask":
             self._set_quote(
@@ -183,11 +201,23 @@ class PMClobFeed:
             )
             return
         if event == "book":
-            bids = data.get("bids") or []
-            asks = data.get("asks") or []
-            if bids or asks:
-                bid = float(bids[0]["price"]) if bids else 0.0
-                ask = float(asks[0]["price"]) if asks else 0.0
-                bid_sz = float(bids[0].get("size", 1)) if bids else 1.0
-                ask_sz = float(asks[0].get("size", 1)) if asks else 1.0
-                self._set_quote(bid, ask, bid_sz, ask_sz)
+            self._apply_book_levels(data.get("bids") or [], data.get("asks") or [])
+            return
+        if event == "price_change":
+            for pc in data.get("price_changes") or []:
+                if str(pc.get("asset_id", "")) != str(self.yes_token_id):
+                    continue
+                self._set_quote(
+                    float(pc.get("best_bid", 0)),
+                    float(pc.get("best_ask", 0)),
+                )
+            return
+
+    def _apply_book_levels(self, bids: list, asks: list) -> None:
+        if not bids and not asks:
+            return
+        bid = float(bids[0]["price"]) if bids else 0.0
+        ask = float(asks[0]["price"]) if asks else 0.0
+        bid_sz = float(bids[0].get("size", 1)) if bids else 1.0
+        ask_sz = float(asks[0].get("size", 1)) if asks else 1.0
+        self._set_quote(bid, ask, bid_sz, ask_sz)
