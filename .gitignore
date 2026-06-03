@@ -1,0 +1,10 @@
+.env
+.venv/
+__pycache__/
+output/
+data/binance/*.json
+data/binance_1m/*.json
+data/pm/quotes/
+*.jsonl
+*.jsonl.gz
+.DS_Store

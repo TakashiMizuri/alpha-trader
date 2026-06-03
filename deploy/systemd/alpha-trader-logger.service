@@ -1,0 +1,28 @@
+[Unit]
+Description=Alpha Trader — PM Spot Fair market logger (phase 1b)
+Documentation=file:///opt/alpha-trader/STRATEGY.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=alpha-trader
+Group=alpha-trader
+WorkingDirectory=/opt/alpha-trader
+EnvironmentFile=/opt/alpha-trader/.env
+# Avoid broken HTTP_PROXY on some hosts blocking WSS
+Environment=NO_PROXY=stream.binance.com,ws-subscriptions-clob.polymarket.com,gamma-api.polymarket.com,clob.polymarket.com
+ExecStart=/opt/alpha-trader/.venv/bin/python /opt/alpha-trader/tools/market_logger.py
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/alpha-trader/output
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
