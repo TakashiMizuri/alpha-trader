@@ -13,27 +13,50 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from pm_spot_fair.config import ArbConfig
-from pm_spot_fair.log_format import expand_log_row, tick_interval_ms
+from pm_spot_fair.log_format import expand_log_row, load_log_file, tick_interval_ms
 
 
 def load_rows(path: Path) -> list[dict]:
-    rows: list[dict] = []
-    text = path.read_text(encoding="utf-8")
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        rows.append(expand_log_row(json.loads(line)))
-    return rows
+    return [expand_log_row(r) for r in load_log_file(path)]
+
+
+def tick_rows(rows: list[dict]) -> list[dict]:
+    return [r for r in rows if r.get("type") != "settle"]
+
+
+def settle_rows(rows: list[dict]) -> list[dict]:
+    return [r for r in rows if r.get("type") == "settle"]
 
 
 def brier_on_rows(rows: list[dict]) -> float | None:
-    settle = [r for r in rows if r.get("type") == "settle"]
+    settle = settle_rows(rows)
     if not settle:
         return None
     preds = [r.get("p_star", 0.5) for r in settle]
     outs = [1 if r.get("outcome_up") else 0 for r in settle]
     return sum((p - y) ** 2 for p, y in zip(preds, outs)) / len(preds)
+
+
+def settle_summary(rows: list[dict]) -> dict:
+    settle = settle_rows(rows)
+    if not settle:
+        return {"n_settle": 0}
+    sources: dict[str, int] = {}
+    agree = 0
+    for r in settle:
+        src = r.get("outcome_source", "unknown")
+        sources[src] = sources.get(src, 0) + 1
+        if r.get("outcome_up_pm") is not None:
+            if bool(r["outcome_up_pm"]) == bool(r.get("outcome_up_spot")):
+                agree += 1
+    return {
+        "n_settle": len(settle),
+        "outcome_sources": sources,
+        "gamma_vs_spot_agree": agree,
+        "gamma_vs_spot_total": sum(
+            1 for r in settle if r.get("outcome_up_pm") is not None
+        ),
+    }
 
 
 def estimate_lag_ms(rows: list[dict]) -> tuple[float, float]:
@@ -60,15 +83,17 @@ def estimate_lag_ms(rows: list[dict]) -> tuple[float, float]:
 
 
 def analyze(rows: list[dict], cfg: ArbConfig) -> dict:
-    gaps = [r.get("gap_level", 0.0) for r in rows if "gap_level" in r]
+    ticks = tick_rows(rows)
+    gaps = [r.get("gap_level", 0.0) for r in ticks if "gap_level" in r]
     abs_gaps = [abs(g) for g in gaps]
     mean_abs_gap = sum(abs_gaps) / len(abs_gaps) if abs_gaps else 0.0
     frac_02 = sum(1 for g in abs_gaps if g > 0.02) / len(abs_gaps) if abs_gaps else 0.0
     frac_05 = sum(1 for g in abs_gaps if g > 0.05) / len(abs_gaps) if abs_gaps else 0.0
 
-    lag_p50, lag_p95 = estimate_lag_ms(rows)
+    lag_p50, lag_p95 = estimate_lag_ms(ticks)
     brier = brier_on_rows(rows)
-    mock = any(r.get("mock_pm") for r in rows)
+    mock = any(r.get("mock_pm") for r in ticks)
+    settle_info = settle_summary(rows)
 
     go_arb = mean_abs_gap >= 0.01 and frac_02 >= 0.05 and lag_p95 >= 200.0
     if mock:
@@ -78,6 +103,7 @@ def analyze(rows: list[dict], cfg: ArbConfig) -> dict:
 
     return {
         "n_rows": len(rows),
+        "n_tick_rows": len(ticks),
         "symbols": symbols,
         "mean_abs_gap": round(mean_abs_gap, 4),
         "frac_gap_gt_0_02": round(frac_02, 4),
@@ -88,6 +114,7 @@ def analyze(rows: list[dict], cfg: ArbConfig) -> dict:
         "go_arb": go_arb,
         "mock_pm": mock,
         "min_edge_suggested": cfg.min_edge,
+        **settle_info,
     }
 
 
@@ -135,9 +162,11 @@ def main() -> None:
     md = [
         "# Market log analysis",
         "",
-        f"- Rows: {report['n_rows']}",
+        f"- Rows: {report['n_rows']} (ticks: {report.get('n_tick_rows', report['n_rows'])})",
+        f"- Settle rows: {report.get('n_settle', 0)}",
         f"- Symbols: {', '.join(report['symbols'])}",
         f"- Mock PM: {report['mock_pm']}",
+        f"- Settle sources: {report.get('outcome_sources', {})}",
         f"- Mean |gap_level|: {report['mean_abs_gap']}",
         f"- Fraction |gap| > 0.02: {report['frac_gap_gt_0_02']}",
         f"- Fraction |gap| > 0.05: {report['frac_gap_gt_0_05']}",

@@ -65,4 +65,4 @@ No inbound ports required. Egress to:
 
 ## Disk
 
-~8–35 MB/day JSONL at 100 ms interval (compact rows); logrotate keeps 14 days by default.
+~4–20 MB/day at 100 ms (v3 CSV rows + header); logrotate keeps 14 days by default.

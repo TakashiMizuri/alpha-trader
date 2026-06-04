@@ -49,7 +49,7 @@ alpha-trader/
 │   ├── pm_book.py         # mid, microprice, edge  [1b]
 │   ├── latency.py         # histograms  [1b/6]
 │   ├── health.py          # logger.json for ops  [1b deploy]
-│   ├── log_format.py      # compact JSONL rows + expand for analysis  [1b]
+│   ├── log_format.py      # v3 CSV log (+ legacy JSONL) + expand  [1b]
 │   ├── market_logger_service.py  # live engine  [1b]
 │   ├── feeds/             # Binance WS, PM CLOB, Gamma  [1b]
 │   ├── book_pressure.py   # stub → phase 4

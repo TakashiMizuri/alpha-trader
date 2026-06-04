@@ -19,10 +19,20 @@ from pm_spot_fair.clock import Window, tau_sec
 from pm_spot_fair.config import LoggerConfig
 from pm_spot_fair.fair import p_up_gbm
 from pm_spot_fair.feeds.binance_ws import BinanceMultiBookTickerFeed, BinanceTick
-from pm_spot_fair.feeds.gamma import effective_pm_slug, resolve_market_by_slug
+from pm_spot_fair.feeds.gamma import (
+    effective_pm_slug,
+    fetch_settled_outcome,
+    resolve_market_by_slug,
+    slug_for_window,
+)
 from pm_spot_fair.feeds.pm_clob import PMClobFeed
 from pm_spot_fair.health import LoggerHealth, utc_iso, write_health
-from pm_spot_fair.log_format import build_compact_row, serialize_row
+from pm_spot_fair.log_format import (
+    build_compact_row,
+    build_settle_row,
+    ensure_log_header,
+    serialize_row,
+)
 from pm_spot_fair.symbols import mock_base_price
 from pm_spot_fair.vol import sigma_ann_from_closes
 
@@ -54,6 +64,8 @@ class SymbolState:
     pm_mock: bool = True
     pm_slug_active: str | None = None
     pm_window_t0: float | None = None
+    last_snapshot: dict | None = None
+    last_settled_window_id: str | None = None
     ticks: int = 0
 
 
@@ -90,6 +102,7 @@ class MarketLoggerService:
         self._last_tick_mono = time.monotonic()
         self._rng_seed = 42
         self._mock_feeds = mock_pm
+        self._settle_tasks: list[asyncio.Task[None]] = []
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
@@ -113,6 +126,9 @@ class MarketLoggerService:
                 await self._tick_all()
                 await asyncio.sleep(self.interval_ms / 1000.0)
         finally:
+            await self._flush_open_windows()
+            if self._settle_tasks:
+                await asyncio.gather(*self._settle_tasks, return_exceptions=True)
             await self._binance.stop()
             for st in self._states.values():
                 if st.pm_feed:
@@ -203,8 +219,13 @@ class MarketLoggerService:
                 window = window_from_utc_5m(now, sym)
                 base = mock_base_price(sym)
                 if last_t0.get(sym) != window.t0_utc.timestamp():
+                    if st.window is not None and st.last_snapshot:
+                        self._schedule_settle(sym, st.window, st.last_snapshot)
                     st.s0 = base * (1.0 + rng.gauss(0, 0.0005))
+                    st.window = window
                     last_t0[sym] = window.t0_utc.timestamp()
+                elif st.window is None:
+                    st.window = window
                 s0 = st.s0 or base
                 phase = hash(sym) % 100
                 s_t = s0 * (
@@ -243,12 +264,23 @@ class MarketLoggerService:
                     pm_connected=False,
                 )
                 self._write_row(row, now)
+                st.last_snapshot = {
+                    "s0": s0,
+                    "s_t": s_t,
+                    "p_star": p_star,
+                    "p_mid": p_mid,
+                    "pm_mock": True,
+                    "pm_slug": None,
+                }
                 st.ticks += 1
 
             self._ticks += len(self.symbols)
             self._last_tick_mono = time.monotonic()
             self._write_health("ok", binance_connected=False, pm_connected=False)
             await asyncio.sleep(self.interval_ms / 1000.0)
+        await self._flush_open_windows()
+        if self._settle_tasks:
+            await asyncio.gather(*self._settle_tasks, return_exceptions=True)
         self._write_health("down")
 
     async def _tick_all(self) -> None:
@@ -288,7 +320,12 @@ class MarketLoggerService:
         self, sym: str, st: SymbolState, b: BinanceTick, now: datetime
     ) -> dict | None:
         window = window_from_utc_5m(now, sym)
-        if st.window is None or window.t0_utc != st.window.t0_utc:
+        if st.window is not None and window.t0_utc != st.window.t0_utc:
+            if st.last_snapshot:
+                self._schedule_settle(sym, st.window, st.last_snapshot)
+            st.window = window
+            st.s0 = b.mid
+        elif st.window is None:
             st.window = window
             st.s0 = b.mid
 
@@ -322,6 +359,14 @@ class MarketLoggerService:
         ts_ms = int(now.timestamp() * 1000)
         b_event_ms = b.event_time_ms or ts_ms
         b_recv_ms = int(b.recv_time_utc.timestamp() * 1000)
+        st.last_snapshot = {
+            "s0": s0,
+            "s_t": s_t,
+            "p_star": p_star,
+            "p_mid": p_mid,
+            "pm_mock": pm_mock,
+            "pm_slug": st.pm_slug_active,
+        }
         return self._build_row(
             symbol=sym,
             window=window,
@@ -340,6 +385,94 @@ class MarketLoggerService:
             ask=ask,
             pm_mock=pm_mock,
             pm_connected=pm_connected,
+        )
+
+    def _schedule_settle(
+        self, sym: str, window: Window, snapshot: dict
+    ) -> None:
+        st = self._states[sym]
+        if st.last_settled_window_id == window.window_id:
+            return
+        st.last_settled_window_id = window.window_id
+        task = asyncio.create_task(
+            self._emit_settle(sym, window, snapshot),
+            name=f"settle-{sym}-{window.window_id}",
+        )
+        self._settle_tasks.append(task)
+
+    async def _flush_open_windows(self) -> None:
+        now = datetime.now(timezone.utc)
+        for sym, st in self._states.items():
+            if st.window and st.last_snapshot:
+                if st.last_settled_window_id != st.window.window_id:
+                    st.last_settled_window_id = st.window.window_id
+                    await self._emit_settle(sym, st.window, st.last_snapshot)
+
+    async def _emit_settle(
+        self, sym: str, window: Window, snapshot: dict
+    ) -> None:
+        s0 = float(snapshot["s0"])
+        s_t = float(snapshot["s_t"])
+        p_star = float(snapshot["p_star"])
+        p_mid = float(snapshot["p_mid"])
+        pm_mock = bool(snapshot.get("pm_mock", True))
+        slug_prefix = self.pm_slugs.get(sym)
+        pm_slug = snapshot.get("pm_slug")
+        if not pm_slug and slug_prefix:
+            pm_slug = slug_for_window(slug_prefix, window.t0_utc)
+
+        outcome_up_spot = s_t > s0
+        outcome_up_pm: bool | None = None
+        source = "spot_proxy"
+
+        if self._mock_feeds or pm_mock:
+            source = "mock_spot"
+        elif pm_slug:
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    gamma = await fetch_settled_outcome(
+                        client,
+                        pm_slug,
+                        poll_sec=5.0,
+                        max_wait_sec=120.0,
+                    )
+                if gamma is not None:
+                    outcome_up_pm = gamma.outcome_up
+                    source = "gamma"
+            except Exception:
+                logger.warning(
+                    "Settle Gamma fetch failed %s %s",
+                    sym,
+                    pm_slug,
+                    exc_info=True,
+                )
+
+        outcome_up = outcome_up_pm if outcome_up_pm is not None else outcome_up_spot
+        ts_ms = int(window.t_end_utc.timestamp() * 1000)
+        row = build_settle_row(
+            symbol=sym,
+            window_t0_ms=int(window.t0_utc.timestamp() * 1000),
+            ts_ms=ts_ms,
+            s0=s0,
+            s_t=s_t,
+            p_star=p_star,
+            p_mid=p_mid,
+            outcome_up=outcome_up,
+            outcome_up_spot=outcome_up_spot,
+            outcome_source=source,
+            outcome_up_pm=outcome_up_pm,
+            pm_mock=pm_mock,
+            pm_slug=pm_slug,
+        )
+        self._write_row(row, window.t_end_utc)
+        logger.info(
+            "Settle %s %s up=%s src=%s spot_up=%s pm_up=%s",
+            sym,
+            window.window_id,
+            outcome_up,
+            source,
+            outcome_up_spot,
+            outcome_up_pm,
         )
 
     def _build_row(
@@ -385,7 +518,7 @@ class MarketLoggerService:
 
     def _write_row(self, row: dict, now: datetime) -> None:
         out_path = resolve_log_path(self.out_template, now)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_log_header(out_path)
         with out_path.open("a", encoding="utf-8") as f:
             f.write(serialize_row(row) + "\n")
 

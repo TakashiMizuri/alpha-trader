@@ -6,6 +6,8 @@ from pm_spot_fair.log_format import (
     build_compact_row,
     expand_log_row,
     is_compact_row,
+    load_log_file,
+    parse_log_line,
     serialize_row,
     tick_interval_ms,
 )
@@ -33,8 +35,11 @@ def test_compact_roundtrip() -> None:
     )
     assert is_compact_row(row)
     line = serialize_row(row)
-    assert " " not in line
-    exp = expand_log_row(row)
+    assert line.startswith("0,")
+    assert "BTCUSDT" in line
+    parsed = parse_log_line(line)
+    assert parsed is not None
+    exp = expand_log_row(parsed)
     assert exp["symbol"] == "BTCUSDT"
     assert exp["gap_level"] == round(0.48 - 0.52, 4)
     assert exp["spread_pm"] == round(0.49 - 0.47, 4)
