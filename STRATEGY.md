@@ -824,12 +824,17 @@ python tools/run_backtest.py --sleeve arb --years 2024 2025 --lag-ms 601 --pm-fe
 
 ### Фаза 3 — Реальный календарь PM
 
-**Создать:** `scripts/fetch_pm_windows.py`, доработать `clock.py` (join PM \(t_0, T\) с 1m klines).
+**Создать:** `scripts/fetch_pm_windows.py`, `pm_windows.py`, доработать `clock.py` (join PM \(t_0, T\) с 1m klines).
+
+**Статус (июнь 2026):** `fetch_pm_windows` — **работает** (Gamma API, 242 BTC окна из 20h лога → `data/pm/windows_btc_20h.json` с `outcome_up`). Сверка \(S_0\) с PM — **в процессе**.
 
 **Критерий выхода:** \(S_0\) сверен с правилами PM; Brier не хуже фазы 1.
 
 ```bash
-python scripts/fetch_pm_windows.py --out data/pm/windows_btc_5m.json
+python scripts/fetch_pm_windows.py \
+  --from-log output/logs/run_20h_enriched.jsonl \
+  --symbol BTCUSDT --slug-prefix btc-updown-5m \
+  --out data/pm/windows_btc_20h.json
 python tools/run_calibration.py --pm-windows data/pm/windows_btc_5m.json
 ```
 
@@ -918,21 +923,25 @@ python scripts/reconcile_pm.py --date 2026-01-15
 
 Stress-матрица: `tools/run_backtest.py --stress` / `--stress-hard` (в hard включён `stress_combo`).
 
+**Edge sweep (BTC, nightmare+3¢, PM fee):** `min_edge=0.05` → **+28.7%** bankroll (лучше 0.03 → +9.3%); отчёт `output/reports/run_20h_btc_edge_sweep/`.
+
 **Ограничения (честно):** это **не** лайв-PnL — мгновенный fill по стакану, hold-to-settle, без partial fill, adverse selection, очереди. Bankroll compound может **расходиться** с Σ PnL/share (cooldown меняет выбор тика). Ранние прогоны использовали flat 1% fee — устарели; ориентир — `--pm-fee-rate 0.07`.
 
 **Вывод по edge:** на 20h данных lag-арб **выглядит жизнеспособным на BTC** (и в целом на портфеле) даже под реальной комиссией и жёстким исполнением; SOL на этом срезе — слабое звено. Mock-логи ≠ live edge.
 
 #### Что дальше (план)
 
+**Операционный чеклист (шаги 1–7, gate, команды):** **[deploy/RUNBOOK.md](deploy/RUNBOOK.md)** — обновляйте таблицу статуса там.
+
 | Приоритет | Шаг | Фаза | Gate |
 |-----------|-----|------|------|
-| 1 | **Redeploy VPS** с текущим логгером + settle emit; прогон **7–10 дней** | 1b | settle в логе без offline enrich |
-| 2 | **min_edge sweep** (0.04–0.05) под PM fee + nightmare fill на BTC | 2 | устойчивый +PnL в stress |
-| 3 | **Фаза 3:** `fetch_pm_windows`, сверка \(S_0\) с правилами PM | 3 | Brier не хуже 1b |
-| 4 | Синтетика `--years` на klines (walk-forward, не holdout-tune) | 2 | дублирует выводы replay |
-| 5 | Пилот **фаза 6:** dry-run → малый notional BTC only | 6 | p95 tick→ack ≈ lag из 1b |
+| 1 | **Redeploy VPS** + settle в логе; **7–10 дней** логгера | 1b | `grep '^1,'` > 0 без enrich |
+| 2 | analyze + stress-hard BTC + edge-sweep на **недельном** логе | 2 | критерии в RUNBOOK §4–5 |
+| 3 | **min_edge** — черновик **0.05** (подтвердить sweep на новом логе) | 2 | не nightmare в лайве |
+| 4 | **Фаза 3:** сверка \(S_0\) с PM | 3 | Brier не хуже 1b |
+| 5 | Пилот **фаза 6:** BTC only, dry-run → ~$5 | 6 | после зелёного RUNBOOK |
 
-**Не делать пока:** grid под equity одного лога; торговля SOL до отдельного подтверждения; фаза 4+ без зелёного gate 2/3.
+**Не делать пока:** SOL в лайве; grid под PnL; фаза 4+ без gate 2/3. См. RUNBOOK §6.
 
 ---
 

@@ -5,6 +5,7 @@ output/
 data/binance/*.json
 data/binance_1m/*.json
 data/pm/quotes/
+data/pm/windows_*.json
 *.jsonl
 *.jsonl.gz
 .DS_Store

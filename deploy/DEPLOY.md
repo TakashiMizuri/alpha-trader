@@ -1,5 +1,7 @@
 # VPS deployment (phase 1b)
 
+**Следующий шаг после 20h прогона:** недельный лог и gate к пилоту — см. **[deploy/RUNBOOK.md](RUNBOOK.md)** (шаги 1–7, критерии, чеклист).
+
 ## Requirements
 
 - Ubuntu 22.04+ (or Debian 12+)

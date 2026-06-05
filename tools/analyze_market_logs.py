@@ -143,8 +143,11 @@ def main() -> None:
     rec = {
         "lag_pm_ms_p50": report["lag_pm_ms_p50"],
         "lag_pm_ms_p95": report["lag_pm_ms_p95"],
+        "lag_ms_for_sim": round(report["lag_pm_ms_p95"]),
         "go_arb": report["go_arb"],
         "min_edge_suggested": report["min_edge_suggested"],
+        "min_edge_stress": 0.05,
+        "pm_fee_rate": cfg.pm_fee_rate,
         "symbols": report["symbols"],
         "per_symbol": {
             s: {

@@ -9,6 +9,7 @@
 
 - Always orient work to **[PROJECT_MAP.md](PROJECT_MAP.md)** — directory layout, phase gates, what belongs where, and what is out of scope.
 - Strategy and economics live in **[STRATEGY.md](STRATEGY.md)**; the map is the operational index.
+- **Operational next steps (VPS week run → pilot gate):** **[deploy/RUNBOOK.md](deploy/RUNBOOK.md)** — read before continuing phase 2/6 work.
 - Version history: **[changelog/](changelog/)** — one file per release (e.g. `changelog/v0.2.md`). **Do not rewrite** older entries (e.g. `v0.1.md` stays as-is).
 
 ### Changelog / release notes (required: Russian + English in one file)

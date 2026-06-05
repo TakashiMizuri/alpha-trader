@@ -160,6 +160,7 @@ def backtest_arb_market_log(
         "min_edge": cfg.min_edge,
         "min_tau_sec": cfg.min_tau_sec,
         "taker_fee": cfg.taker_fee,
+        "pm_fee_rate": cfg.pm_fee_rate,
         "max_spread": opts.max_spread,
         "cooldown_sec": opts.cooldown_sec,
         "one_per_window": opts.one_per_window,

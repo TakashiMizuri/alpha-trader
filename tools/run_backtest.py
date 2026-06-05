@@ -60,6 +60,8 @@ def _summary_md(report: dict, title: str, extra: list[str] | None = None) -> str
         f"- Trades: {report['n_trades']} / {report['windows_with_settle']} windows",
         f"- cooldown_sec: {report.get('cooldown_sec', 0)}",
         f"- fill: {report.get('fill_mode')} slippage={report.get('slippage')}",
+        f"- fee: pm_fee_rate={report.get('pm_fee_rate')} "
+        f"(flat taker_fee={report.get('taker_fee')})",
         f"- **Total PnL** (per-share unit): {report['total_pnl']}",
         f"- Mean PnL / trade: {report['mean_pnl_per_trade']}",
         f"- Win rate: {report['win_rate']}",
@@ -208,6 +210,13 @@ def main() -> None:
         action="store_true",
         help="Worse fills: extreme/nightmare spread + 3-5c slippage",
     )
+    p.add_argument(
+        "--edge-sweep",
+        nargs="+",
+        type=float,
+        metavar="MIN_EDGE",
+        help="Sweep min_edge values (requires --logs); uses --fill-mode/--slippage",
+    )
     p.add_argument("--pm-spread", type=float, default=0.02, help="Synthetic PM spread")
     args = p.parse_args()
 
@@ -222,6 +231,69 @@ def main() -> None:
         pm_fee_rate=fee_rate,
     )
     args.out.mkdir(parents=True, exist_ok=True)
+
+    if args.edge_sweep:
+        if args.logs is None:
+            raise SystemExit("--edge-sweep requires --logs")
+        rows = [expand_log_row(r) for r in load_log_file(args.logs)]
+        sym_filter = _log_symbols(args)
+        rows = _filter_log_rows(rows, sym_filter)
+        opts = _opts_from_args(args)
+        if opts.lag_ms is None and args.lag_ms is not None:
+            opts = ArbReplayOptions(
+                max_spread=opts.max_spread,
+                lag_ms=args.lag_ms,
+                cooldown_sec=opts.cooldown_sec,
+                one_per_window=opts.one_per_window,
+                fill_mode=opts.fill_mode,
+                slippage=opts.slippage,
+                bankroll_start=opts.bankroll_start,
+                stake_pct=opts.stake_pct,
+                bankroll_compound=opts.bankroll_compound,
+            )
+        results: dict[str, dict] = {}
+        md = [
+            "# Edge sweep",
+            "",
+            f"Log: `{args.logs}`",
+            f"fill: {opts.fill_mode} slippage={opts.slippage}",
+            f"pm_fee_rate: {fee_rate}",
+        ]
+        if sym_filter:
+            md.append(f"Symbols: {', '.join(sym_filter)}")
+        md.extend(["", "| min_edge | trades | total_pnl | win_rate | bankroll |", "|----------|--------|-----------|----------|----------|"])
+        for edge in sorted(set(args.edge_sweep)):
+            sweep_cfg = ArbConfig(
+                min_edge=edge,
+                min_tau_sec=args.min_tau_sec,
+                taker_fee=args.taker_fee,
+                pm_fee_rate=fee_rate,
+            )
+            rep = backtest_arb_market_log(rows, sweep_cfg, opts)
+            key = f"{edge:.4f}".rstrip("0").rstrip(".")
+            results[key] = {k: v for k, v in rep.items() if k != "trades"}
+            br = rep.get("bankroll", {})
+            br_s = f"${br.get('end', '—')}" if br else "—"
+            md.append(
+                f"| {key} | {rep['n_trades']} | {rep['total_pnl']} | "
+                f"{rep['win_rate']} | {br_s} |"
+            )
+        payload = {
+            "meta": {
+                "log": str(args.logs),
+                "fill_mode": opts.fill_mode,
+                "slippage": opts.slippage,
+                "pm_fee_rate": fee_rate,
+                "lag_ms": opts.lag_ms,
+            },
+            "results": results,
+        }
+        (args.out / "edge_sweep.json").write_text(
+            json.dumps(payload, indent=2), encoding="utf-8"
+        )
+        (args.out / "edge_sweep.md").write_text("\n".join(md), encoding="utf-8")
+        print(json.dumps(payload, indent=2))
+        return
 
     if args.stress or args.stress_hard:
         if args.logs is None:
