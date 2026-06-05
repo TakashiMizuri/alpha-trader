@@ -15,7 +15,7 @@ Environment=NO_PROXY=stream.binance.com,ws-subscriptions-clob.polymarket.com,gam
 ExecStart=/opt/alpha-trader/.venv/bin/python /opt/alpha-trader/tools/market_logger.py
 Restart=on-failure
 RestartSec=5
-TimeoutStopSec=30
+TimeoutStopSec=120
 KillSignal=SIGTERM
 
 NoNewPrivileges=true

@@ -10,6 +10,8 @@ class ArbConfig:
     min_edge: float = 0.03
     min_tau_sec: float = 30.0
     taker_fee: float = 0.01
+    # Polymarket crypto dynamic fee: feeRate=0.07 → fee/share = rate*p*(1-p)
+    pm_fee_rate: float | None = 0.07
     sigma_ewma_span: int = 60
 
 

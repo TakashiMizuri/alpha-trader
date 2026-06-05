@@ -190,6 +190,14 @@ python tools/analyze_market_logs.py --logs output/logs/smoke.jsonl --out output/
 **Фаза 2** (после 1b go)
 
 ```bash
+# Replay лайв-лога (приоритет, если есть settle-строки)
+python tools/enrich_settle.py --in output/logs/run_20h.jsonl --out output/logs/run_20h_enriched.jsonl
+python tools/run_backtest.py --sleeve arb \
+  --logs output/logs/run_20h_enriched.jsonl \
+  --lag-ms 601 --pm-fee-rate 0.07 \
+  --out output/reports/run_20h_backtest_pm
+
+# Синтетика на klines (нужны data/binance/)
 python tools/run_backtest.py --sleeve arb --years 2024 --lag-ms <from_1b_report>
 ```
 
@@ -611,7 +619,8 @@ pm-spot-fair/                    # корень репозитория
 class ArbConfig:
     min_edge: float = 0.02
     min_tau_sec: float = 30.0      # не торговать последние N сек
-    taker_fee: float = 0.01
+    taker_fee: float = 0.01        # flat fallback, если pm_fee_rate=None
+    pm_fee_rate: float | None = 0.07  # crypto: fee = rate × p × (1−p)
     sigma_ewma_span: int = 60
 
 @dataclass
@@ -794,12 +803,21 @@ python tools/analyze_market_logs.py --logs output/logs/market_2026-01.jsonl --ou
 
 ### Фаза 2 — Синтетический PM + рукав A
 
-**Создать:** `sim/event_sim.py` ( \(p_{\text{mkt}} = p^* + \text{lag}(\Delta S) + \epsilon\), bid/ask ), `signals_arb.py`, `tools/run_backtest.py --sleeve arb`.
+**Создать:** `sim/event_sim.py`, `signals_arb.py`, `sim/market_log_arb.py`, `tools/run_backtest.py --sleeve arb` (replay + synthetic).
 
-**Критерий выхода:** `lag_pm_ms` в симе взят из **p95 tick→recv PM** (или эквивалент) фазы 1b; при разумном лаге edge в симе ≥ 0; метрики gap half-life из §14.
+**Статус (июнь 2026):** replay на 20h enriched-логе — **положительный** на BTC и портфеле под PM crypto fee (см. [§10.1](#101-статус-и-эмпирические-результаты-июнь-2026)); синтетика `--years` — не прогонялась (нет klines в репо). Gate §0.8 для фазы 2 **частично**: lag из 1b зафиксирован, edge > 0 на replay, но один короткий лог ≠ OOS.
+
+**Критерий выхода:** `lag_pm_ms` из **p95** 1b; edge ≥ 0 при PM fee + stress fill; повтор на **независимом** логе (неделя+); синтетика согласуется с replay.
 
 ```bash
-python tools/run_backtest.py --sleeve arb --years 2024 2025 --lag-ms 500 --spread 0.02
+# Replay (приоритет)
+python tools/run_backtest.py --sleeve arb \
+  --logs output/logs/run_20h_enriched.jsonl --lag-ms 601 \
+  --pm-fee-rate 0.07 --stress-hard --bankroll 100 --stake-pct 0.015 \
+  --out output/reports/run_20h_btc_pm_fee --symbol-only --symbol BTCUSDT
+
+# Synthetic
+python tools/run_backtest.py --sleeve arb --years 2024 2025 --lag-ms 601 --pm-fee-rate 0.07
 ```
 
 ---
@@ -861,6 +879,60 @@ python scripts/reconcile_pm.py --date 2026-01-15
 | 4 | Сим/логи | + L2 | Поток помогает? |
 | 5 | Сим | то же | MM ок? |
 | 6 | Лайв | WS + API + ордера | PnL и latency? |
+
+### 10.1 Статус и эмпирические результаты (июнь 2026)
+
+**Где мы:** фазы **0, 1, 1b** — выполнены; **фаза 2** — replay arb на 20h лайв-логе (не финальный gate). Фазы 3–6 — заглушки.
+
+**Артефакты:** `output/logs/run_20h.jsonl` (20h VPS), `run_20h_enriched.jsonl` (723 settle из Gamma), отчёты в `output/reports/run_20h*`, `run_20h_btc_pm_fee/`.
+
+#### Фаза 1b — 20h лайв (BTC + ETH + SOL, 5m)
+
+| Метрика | Значение |
+|---------|----------|
+| Тиков | 919 639 (~20h) |
+| Окон / settle | 241 / символ → **723** (после enrich Gamma) |
+| PM connected | 99.77% |
+| **lag_pm_ms** p50 / p95 | **406 / 601 ms** |
+| mean \|gap_level\| | 0.177 |
+| Доля \|gap\| > 0.02 / 0.05 | 80% / 71% |
+| Brier \(p^\*\) (enriched) | **0.040** |
+| spot vs Gamma (enriched) | согласие **95.9%** |
+| **go_arb** | **GO** (все три символа) |
+
+**Известная проблема:** сырой VPS-лог `run_20h.jsonl` — **0 settle-строк** (старая сборка без emit settle). Исправлено в коде; settle добран офлайн через `tools/enrich_settle.py`. После redeploy проверять `grep '^1,'` и v3 header.
+
+**\(S_0\):** первый Binance mid после старта логгера, не официальный PM open → ~4% расхождений spot_proxy vs Gamma (SOL, поздний старт).
+
+#### Фаза 2 — replay arb (mark-to-settle, 1 сделка/окно, первый сигнал)
+
+Параметры: `lag_ms=601` (p95 1b), `min_edge=0.03`, `min_tau_sec=30`, fill=touch, **комиссия PM crypto** `feeRate=0.07`, `fee = rate × p × (1−p)` ([docs](https://docs.polymarket.com/trading/fees)); при p=0.50 ≈ **3.5% от нотиона** / **1.75% от $1 face**.
+
+| Срез | Сделок | Σ PnL/share | Bankroll $100→ (1.5% compound) | Примечание |
+|------|--------|-------------|--------------------------------|------------|
+| **Все символы** baseline | 723 | +19.60 | **$164.6 (+65%)** | SOL **−0.86** share-sum |
+| BTC baseline | 241 | +13.08 | **$144.9 (+45%)** | |
+| BTC stress_combo | 239 | +10.72 | **$204.8 (+105%)** | cd300 + half_spread + 1¢ |
+| BTC nightmare+3¢ | 241 | +4.12 | $109.3 (+9%) | жёсткий fill |
+| BTC nightmare+5¢ | 241 | +4.64 | $112.6 (+13%) | |
+
+Stress-матрица: `tools/run_backtest.py --stress` / `--stress-hard` (в hard включён `stress_combo`).
+
+**Ограничения (честно):** это **не** лайв-PnL — мгновенный fill по стакану, hold-to-settle, без partial fill, adverse selection, очереди. Bankroll compound может **расходиться** с Σ PnL/share (cooldown меняет выбор тика). Ранние прогоны использовали flat 1% fee — устарели; ориентир — `--pm-fee-rate 0.07`.
+
+**Вывод по edge:** на 20h данных lag-арб **выглядит жизнеспособным на BTC** (и в целом на портфеле) даже под реальной комиссией и жёстким исполнением; SOL на этом срезе — слабое звено. Mock-логи ≠ live edge.
+
+#### Что дальше (план)
+
+| Приоритет | Шаг | Фаза | Gate |
+|-----------|-----|------|------|
+| 1 | **Redeploy VPS** с текущим логгером + settle emit; прогон **7–10 дней** | 1b | settle в логе без offline enrich |
+| 2 | **min_edge sweep** (0.04–0.05) под PM fee + nightmare fill на BTC | 2 | устойчивый +PnL в stress |
+| 3 | **Фаза 3:** `fetch_pm_windows`, сверка \(S_0\) с правилами PM | 3 | Brier не хуже 1b |
+| 4 | Синтетика `--years` на klines (walk-forward, не holdout-tune) | 2 | дублирует выводы replay |
+| 5 | Пилот **фаза 6:** dry-run → малый notional BTC only | 6 | p95 tick→ack ≈ lag из 1b |
+
+**Не делать пока:** grid под equity одного лога; торговля SOL до отдельного подтверждения; фаза 4+ без зелёного gate 2/3.
 
 ---
 
@@ -985,6 +1057,8 @@ python scripts/reconcile_pm.py --date 2026-01-15
 | Поток не помогает | Рукав A только по `gap_level`; фазу 4 отложить |
 | Всё слабое | Не строить лайв-арб; возможно только рукав C (ребейты) |
 
+**Текущий вывод (20h, июнь 2026):** строка 1 — **GO** → фаза 2 replay дала +PnL на BTC под PM fee; следующий шаг — **недельный лог с settle в файле**, затем min_edge sweep и фаза 3 (\(S_0\)). SOL — отдельная проверка перед включением в лайв.
+
 ### 11.9 Команды и файлы
 
 ```bash
@@ -1003,11 +1077,11 @@ python tools/analyze_market_logs.py \
 
 ### 11.10 Чеклист «неделя прошла»
 
-- [ ] < 1% пропусков WS (по длительности сессии)
-- [ ] Settle-строки для большинства окон
-- [ ] Отчёт go/no-go сохранён
-- [ ] `lag_pm_ms` для сима записан в `config` / README прогона
-- [ ] Понятно, совпадает ли индекс PM с Binance mid (нет вечного смещения gap)
+- [x] < 1% пропусков WS (20h: PM connected 99.77%)
+- [ ] Settle-строки **в лайв-логе** (20h: 0 в сыром файле — нужен redeploy + недельный прогон)
+- [x] Отчёт go/no-go сохранён (`output/reports/run_20h_enriched/`)
+- [x] `lag_pm_ms` для сима: **p95 ≈ 601 ms** → `lag_ms=601` в backtest
+- [ ] \(S_0\) сверен с PM (сейчас proxy; ~4% spot vs Gamma)
 
 ---
 

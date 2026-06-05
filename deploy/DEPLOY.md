@@ -34,6 +34,35 @@ LOG_LEVEL=INFO
 
 Do **not** set `PM_API_*` keys for phase 1b — read-only public feeds only.
 
+## Redeploy (after `git pull` — required for settle rows + v3 CSV)
+
+The logger must run **current** code: v3 CSV lines (`0,...` ticks, `1,...` settle) with a `# alpha-trader market log v3` header. Old builds wrote compact JSON only and **no settle rows**.
+
+```bash
+cd /opt/alpha-trader-src   # or your clone path
+git pull
+sudo bash deploy/install.sh
+sudo systemctl restart alpha-trader-logger
+```
+
+Verify within one 5m window (or after stop):
+
+```bash
+head -6 /opt/alpha-trader/output/logs/market_$(date -u +%Y-%m-%d).jsonl
+# expect: # alpha-trader market log v3  and  0,BTCUSDT,...
+grep -c '^1,' /opt/alpha-trader/output/logs/market_$(date -u +%Y-%m-%d).jsonl
+# expect: > 0 after at least one window closed
+```
+
+Optional `.env` (live Gamma poll on settle; falls back to `spot_proxy`):
+
+```bash
+SETTLE_GAMMA_MAX_WAIT_SEC=12
+SETTLE_GAMMA_POLL_SEC=2
+```
+
+Offline ground truth: `tools/enrich_settle.py` on finished logs.
+
 ## Operations
 
 | Task | Command |

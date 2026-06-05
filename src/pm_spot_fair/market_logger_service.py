@@ -102,7 +102,29 @@ class MarketLoggerService:
         self._last_tick_mono = time.monotonic()
         self._rng_seed = 42
         self._mock_feeds = mock_pm
-        self._settle_tasks: list[asyncio.Task[None]] = []
+        self._settle_queue: asyncio.Queue[
+            tuple[str, Window, dict] | None
+        ] = asyncio.Queue()
+        self._settle_worker_task: asyncio.Task[None] | None = None
+
+    def _settle_gamma_max_wait_sec(self) -> float:
+        return float(os.environ.get("SETTLE_GAMMA_MAX_WAIT_SEC", "12"))
+
+    def _settle_gamma_poll_sec(self) -> float:
+        return float(os.environ.get("SETTLE_GAMMA_POLL_SEC", "2"))
+
+    async def _settle_worker(self) -> None:
+        while True:
+            item = await self._settle_queue.get()
+            try:
+                if item is None:
+                    break
+                sym, window, snapshot = item
+                await self._emit_settle(sym, window, snapshot)
+            except Exception:
+                logger.exception("Settle worker failed for %s", item)
+            finally:
+                self._settle_queue.task_done()
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
@@ -118,6 +140,9 @@ class MarketLoggerService:
 
         await self._setup_pm_feeds()
         await self._binance.start()
+        self._settle_worker_task = asyncio.create_task(
+            self._settle_worker(), name="settle-worker"
+        )
         started = time.monotonic()
         try:
             while not self._stop.is_set():
@@ -127,8 +152,10 @@ class MarketLoggerService:
                 await asyncio.sleep(self.interval_ms / 1000.0)
         finally:
             await self._flush_open_windows()
-            if self._settle_tasks:
-                await asyncio.gather(*self._settle_tasks, return_exceptions=True)
+            await self._settle_queue.join()
+            await self._settle_queue.put(None)
+            if self._settle_worker_task is not None:
+                await self._settle_worker_task
             await self._binance.stop()
             for st in self._states.values():
                 if st.pm_feed:
@@ -208,80 +235,86 @@ class MarketLoggerService:
         rng = random.Random(self._rng_seed)
         started = time.monotonic()
         last_t0: dict[str, float] = {}
+        self._settle_worker_task = asyncio.create_task(
+            self._settle_worker(), name="settle-worker-mock"
+        )
+        try:
+            while not self._stop.is_set():
+                if self.duration_sec and (time.monotonic() - started) >= self.duration_sec:
+                    break
+                now = datetime.now(timezone.utc)
+                elapsed = time.monotonic() - started
 
-        while not self._stop.is_set():
-            if self.duration_sec and (time.monotonic() - started) >= self.duration_sec:
-                break
-            now = datetime.now(timezone.utc)
-            elapsed = time.monotonic() - started
+                for sym, st in self._states.items():
+                    window = window_from_utc_5m(now, sym)
+                    base = mock_base_price(sym)
+                    if last_t0.get(sym) != window.t0_utc.timestamp():
+                        if st.window is not None and st.last_snapshot:
+                            self._schedule_settle(sym, st.window, st.last_snapshot)
+                        st.s0 = base * (1.0 + rng.gauss(0, 0.0005))
+                        st.window = window
+                        last_t0[sym] = window.t0_utc.timestamp()
+                    elif st.window is None:
+                        st.window = window
+                    s0 = st.s0 or base
+                    phase = hash(sym) % 100
+                    s_t = s0 * (
+                        1.0
+                        + 0.0003 * math.sin((elapsed + phase) / 30.0)
+                        + 0.0001 * math.cos((elapsed + phase) / 7.0)
+                    )
+                    st.closes.append(s_t)
+                    if len(st.closes) > 200:
+                        st.closes = st.closes[-200:]
+                    sigma = max(
+                        sigma_ann_from_closes(st.closes, span=60),
+                        self.cfg.sigma_floor_ann,
+                    )
+                    tau = tau_sec(now, window)
+                    p_star = p_up_gbm(s=s_t, s0=s0, tau_sec=tau, sigma_ann=sigma)
+                    p_mid, p_micro, bid, ask = self._mock_pm_quotes(st, p_star)
+                    now_ms = int(now.timestamp() * 1000)
+                    row = self._build_row(
+                        symbol=sym,
+                        window=window,
+                        ts_ms=now_ms,
+                        b_event_ms=now_ms,
+                        b_recv_ms=now_ms,
+                        pm_recv_ms=now_ms,
+                        s0=s0,
+                        s_t=s_t,
+                        sigma=sigma,
+                        tau=tau,
+                        p_star=p_star,
+                        p_mid=p_mid,
+                        p_micro=p_micro,
+                        bid=bid,
+                        ask=ask,
+                        pm_mock=True,
+                        pm_connected=False,
+                    )
+                    self._write_row(row, now)
+                    st.last_snapshot = {
+                        "s0": s0,
+                        "s_t": s_t,
+                        "p_star": p_star,
+                        "p_mid": p_mid,
+                        "pm_mock": True,
+                        "pm_slug": None,
+                    }
+                    st.ticks += 1
 
-            for sym, st in self._states.items():
-                window = window_from_utc_5m(now, sym)
-                base = mock_base_price(sym)
-                if last_t0.get(sym) != window.t0_utc.timestamp():
-                    if st.window is not None and st.last_snapshot:
-                        self._schedule_settle(sym, st.window, st.last_snapshot)
-                    st.s0 = base * (1.0 + rng.gauss(0, 0.0005))
-                    st.window = window
-                    last_t0[sym] = window.t0_utc.timestamp()
-                elif st.window is None:
-                    st.window = window
-                s0 = st.s0 or base
-                phase = hash(sym) % 100
-                s_t = s0 * (
-                    1.0
-                    + 0.0003 * math.sin((elapsed + phase) / 30.0)
-                    + 0.0001 * math.cos((elapsed + phase) / 7.0)
-                )
-                st.closes.append(s_t)
-                if len(st.closes) > 200:
-                    st.closes = st.closes[-200:]
-                sigma = max(
-                    sigma_ann_from_closes(st.closes, span=60),
-                    self.cfg.sigma_floor_ann,
-                )
-                tau = tau_sec(now, window)
-                p_star = p_up_gbm(s=s_t, s0=s0, tau_sec=tau, sigma_ann=sigma)
-                p_mid, p_micro, bid, ask = self._mock_pm_quotes(st, p_star)
-                now_ms = int(now.timestamp() * 1000)
-                row = self._build_row(
-                    symbol=sym,
-                    window=window,
-                    ts_ms=now_ms,
-                    b_event_ms=now_ms,
-                    b_recv_ms=now_ms,
-                    pm_recv_ms=now_ms,
-                    s0=s0,
-                    s_t=s_t,
-                    sigma=sigma,
-                    tau=tau,
-                    p_star=p_star,
-                    p_mid=p_mid,
-                    p_micro=p_micro,
-                    bid=bid,
-                    ask=ask,
-                    pm_mock=True,
-                    pm_connected=False,
-                )
-                self._write_row(row, now)
-                st.last_snapshot = {
-                    "s0": s0,
-                    "s_t": s_t,
-                    "p_star": p_star,
-                    "p_mid": p_mid,
-                    "pm_mock": True,
-                    "pm_slug": None,
-                }
-                st.ticks += 1
-
-            self._ticks += len(self.symbols)
-            self._last_tick_mono = time.monotonic()
-            self._write_health("ok", binance_connected=False, pm_connected=False)
-            await asyncio.sleep(self.interval_ms / 1000.0)
-        await self._flush_open_windows()
-        if self._settle_tasks:
-            await asyncio.gather(*self._settle_tasks, return_exceptions=True)
-        self._write_health("down")
+                self._ticks += len(self.symbols)
+                self._last_tick_mono = time.monotonic()
+                self._write_health("ok", binance_connected=False, pm_connected=False)
+                await asyncio.sleep(self.interval_ms / 1000.0)
+        finally:
+            await self._flush_open_windows()
+            await self._settle_queue.join()
+            await self._settle_queue.put(None)
+            if self._settle_worker_task is not None:
+                await self._settle_worker_task
+            self._write_health("down")
 
     async def _tick_all(self) -> None:
         now = datetime.now(timezone.utc)
@@ -393,24 +426,21 @@ class MarketLoggerService:
         st = self._states[sym]
         if st.last_settled_window_id == window.window_id:
             return
-        st.last_settled_window_id = window.window_id
-        task = asyncio.create_task(
-            self._emit_settle(sym, window, snapshot),
-            name=f"settle-{sym}-{window.window_id}",
-        )
-        self._settle_tasks.append(task)
+        self._settle_queue.put_nowait((sym, window, snapshot))
 
     async def _flush_open_windows(self) -> None:
-        now = datetime.now(timezone.utc)
         for sym, st in self._states.items():
             if st.window and st.last_snapshot:
                 if st.last_settled_window_id != st.window.window_id:
-                    st.last_settled_window_id = st.window.window_id
                     await self._emit_settle(sym, st.window, st.last_snapshot)
 
     async def _emit_settle(
         self, sym: str, window: Window, snapshot: dict
     ) -> None:
+        st = self._states[sym]
+        if st.last_settled_window_id == window.window_id:
+            return
+
         s0 = float(snapshot["s0"])
         s_t = float(snapshot["s_t"])
         p_star = float(snapshot["p_star"])
@@ -433,8 +463,8 @@ class MarketLoggerService:
                     gamma = await fetch_settled_outcome(
                         client,
                         pm_slug,
-                        poll_sec=5.0,
-                        max_wait_sec=120.0,
+                        poll_sec=self._settle_gamma_poll_sec(),
+                        max_wait_sec=self._settle_gamma_max_wait_sec(),
                     )
                 if gamma is not None:
                     outcome_up_pm = gamma.outcome_up
@@ -464,16 +494,41 @@ class MarketLoggerService:
             pm_mock=pm_mock,
             pm_slug=pm_slug,
         )
-        self._write_row(row, window.t_end_utc)
-        logger.info(
-            "Settle %s %s up=%s src=%s spot_up=%s pm_up=%s",
-            sym,
-            window.window_id,
-            outcome_up,
-            source,
-            outcome_up_spot,
-            outcome_up_pm,
-        )
+        try:
+            self._write_row(row, window.t_end_utc)
+            st.last_settled_window_id = window.window_id
+            logger.info(
+                "Settle %s %s up=%s src=%s spot_up=%s pm_up=%s",
+                sym,
+                window.window_id,
+                outcome_up,
+                source,
+                outcome_up_spot,
+                outcome_up_pm,
+            )
+        except Exception:
+            logger.exception(
+                "Settle row write failed %s %s — retrying spot_proxy",
+                sym,
+                window.window_id,
+            )
+            fallback = build_settle_row(
+                symbol=sym,
+                window_t0_ms=int(window.t0_utc.timestamp() * 1000),
+                ts_ms=ts_ms,
+                s0=s0,
+                s_t=s_t,
+                p_star=p_star,
+                p_mid=p_mid,
+                outcome_up=outcome_up_spot,
+                outcome_up_spot=outcome_up_spot,
+                outcome_source="spot_proxy",
+                outcome_up_pm=None,
+                pm_mock=pm_mock,
+                pm_slug=pm_slug,
+            )
+            self._write_row(fallback, window.t_end_utc)
+            st.last_settled_window_id = window.window_id
 
     def _build_row(
         self,
